@@ -1,5 +1,5 @@
 
-// File: grayscale-image-lambda/src/main/java/com/example/grayscaleimage/Handler
+// File: grayscale-image-lambda/src/main/java/com/example/grayscaleimage/Handler.java
 package com.example.grayscaleimage;
 
 import com.amazonaws.services.lambda.runtime.Context;
