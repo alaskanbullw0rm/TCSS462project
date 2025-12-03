@@ -1,9 +1,10 @@
 
-// File: rotate-image-lambda/src/main/java/com/example/rotateimage/Handler
-package org.example;
+// File: grayscale-image-lambda/src/main/java/com/example/grayscaleimage/Handler
+package com.example.grayscaleimage;
 
 import com.amazonaws.services.lambda.runtime.Context;
 import com.amazonaws.services.lambda.runtime.RequestHandler;
+import lambda.SAAMetrics;
 
 import software.amazon.awssdk.core.ResponseInputStream;
 import software.amazon.awssdk.core.sync.RequestBody;
@@ -11,8 +12,6 @@ import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.*;
 
 import javax.imageio.ImageIO;
-import java.awt.Graphics2D;
-import java.awt.RenderingHints;
 import java.awt.image.BufferedImage;
 import java.io.*;
 import java.nio.file.Files;
@@ -22,11 +21,11 @@ import java.util.Locale;
 import java.util.Map;
 
 /**
- * rotateImage Lambda:
+ * grayscaleImage Lambda:
  * - Reads image from S3 (bucket, key)
- * - Rotates exactly 90 degrees clockwise
+ * - Converts to grayscale pixel-by-pixel using luminosity: 0.21R + 0.72G + 0.07B
  * - Preserves file format (PNG/JPG)
- * - Writes to "rotated-{key}"
+ * - Writes to "grayscale-{key}"
  * - Returns metrics + outputKey
  *
  * Fault tolerance:
@@ -36,7 +35,6 @@ import java.util.Map;
  */
 public class Handler implements RequestHandler<Map<String, Object>, Map<String, Object>> {
 
-    // Use one S3Client per invocation (SDK v2 is thread-safe, but Lambda handler is single-invocation here).
     private final S3Client s3 = S3Client.builder().build();
 
     @Override
@@ -46,20 +44,14 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
         // processing …
         long endTime = System.currentTimeMillis();
 
-        // NOTE: We will actually set start/end around real processing code below.
-        // The snippet above is included exactly as required and we will override timings properly.
-
         SAAMetrics metrics = new SAAMetrics();
 
-        // Basic validation
         String bucket = asString(input.get("bucket"));
         String key = asString(input.get("key"));
         if (bucket == null || bucket.isEmpty() || key == null || key.isEmpty()) {
             return error("Missing 'bucket' or 'key' in input.");
         }
 
-        // Enforce S3-only mode for large images (JSON payload limit ~6MB):
-        // Our contract is bucket/key only; if any unexpected payload field indicates inline image, return error.
         if (input.containsKey("imageBytes") || input.containsKey("imageBase64")) {
             return error("Inline image payloads are not supported. Provide S3 bucket/key only.");
         }
@@ -71,7 +63,6 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
         ResponseInputStream<GetObjectResponse> s3Stream = null;
 
         try {
-            // HEAD to get content length for memory-aware decision
             HeadObjectResponse head = s3.headObject(HeadObjectRequest.builder()
                     .bucket(bucket)
                     .key(key)
@@ -81,16 +72,13 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
             String format = formatFromKey(key);
             String contentType = contentTypeForFormat(format);
 
-            // Decide whether to stream directly or spool to /tmp
             Runtime rt = Runtime.getRuntime();
             long freeMem = rt.freeMemory();
-            long threshold = Math.max(5 * 1024 * 1024, freeMem / 2); // at least 5MB or half free mem
-
+            long threshold = Math.max(5 * 1024 * 1024, freeMem / 2);
             boolean useTmp = contentLength > threshold;
 
             if (useTmp) {
-                // Stream S3 object to /tmp file without loading whole object in memory
-                tempInputFile = Files.createTempFile("rotate-input-", "-" + sanitizeFilename(key));
+                tempInputFile = Files.createTempFile("gray-input-", "-" + sanitizeFilename(key));
                 try (ResponseInputStream<GetObjectResponse> in = s3.getObject(GetObjectRequest.builder()
                         .bucket(bucket)
                         .key(key)
@@ -104,7 +92,6 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
                 }
                 srcImage = ImageIO.read(tempInputFile.toFile());
             } else {
-                // Stream directly from S3 to ImageIO
                 s3Stream = s3.getObject(GetObjectRequest.builder()
                         .bucket(bucket)
                         .key(key)
@@ -116,30 +103,33 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
                 return error("Invalid image or unsupported format for key: " + key);
             }
 
-            // Perform rotation: 90 degrees clockwise
-            int srcW = srcImage.getWidth();
-            int srcH = srcImage.getHeight();
-            int type = srcImage.getColorModel().hasAlpha() ? BufferedImage.TYPE_INT_ARGB : BufferedImage.TYPE_INT_RGB;
+            // Grayscale conversion (pixel-by-pixel), preserve alpha if present
+            int w = srcImage.getWidth();
+            int h = srcImage.getHeight();
+            boolean hasAlpha = srcImage.getColorModel().hasAlpha();
+            int type = hasAlpha ? BufferedImage.TYPE_INT_ARGB : BufferedImage.TYPE_INT_RGB;
+            BufferedImage gray = new BufferedImage(w, h, type);
 
-            BufferedImage rotated = new BufferedImage(srcH, srcW, type);
-            Graphics2D g2d = rotated.createGraphics();
-            try {
-                // Bilinear interpolation for best visual quality during remap
-                g2d.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
-                // Translate then rotate to position source image correctly
-                g2d.translate(srcH, 0);
-                g2d.rotate(Math.toRadians(90));
-                g2d.drawImage(srcImage, 0, 0, null);
-            } finally {
-                g2d.dispose();
+            for (int y = 0; y < h; y++) {
+                for (int x = 0; x < w; x++) {
+                    int argb = srcImage.getRGB(x, y);
+                    int a = (argb >>> 24) & 0xFF;
+                    int r = (argb >>> 16) & 0xFF;
+                    int g = (argb >>> 8) & 0xFF;
+                    int b = (argb) & 0xFF;
+                    int grayVal = (int)Math.round(0.21 * r + 0.72 * g + 0.07 * b);
+                    int newArgb = hasAlpha
+                            ? ((a & 0xFF) << 24) | (grayVal << 16) | (grayVal << 8) | grayVal
+                            : (0xFF << 24) | (grayVal << 16) | (grayVal << 8) | grayVal;
+                    gray.setRGB(x, y, newArgb);
+                }
             }
 
-            // Write rotated image back to S3
-            String newKey = "rotated-" + key;
+            String newKey = "grayscale-" + key;
 
             if (useTmp) {
-                tempOutputFile = Files.createTempFile("rotate-output-", "-" + sanitizeFilename(newKey));
-                ImageIO.write(rotated, format, tempOutputFile.toFile());
+                tempOutputFile = Files.createTempFile("gray-output-", "-" + sanitizeFilename(newKey));
+                ImageIO.write(gray, format, tempOutputFile.toFile());
                 PutObjectRequest putReq = PutObjectRequest.builder()
                         .bucket(bucket)
                         .key(newKey)
@@ -147,9 +137,8 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
                         .build();
                 s3.putObject(putReq, RequestBody.fromFile(tempOutputFile));
             } else {
-                // Avoid unnecessary copies; write to ByteArrayOutputStream only when small enough
                 try (ByteArrayOutputStream baos = new ByteArrayOutputStream(Math.max(32 * 1024, (int) Math.min(contentLength, Integer.MAX_VALUE)))) {
-                    ImageIO.write(rotated, format, baos);
+                    ImageIO.write(gray, format, baos);
                     PutObjectRequest putReq = PutObjectRequest.builder()
                             .bucket(bucket)
                             .key(newKey)
@@ -159,7 +148,6 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
                 }
             }
 
-            // SAAF metrics
             long end = System.currentTimeMillis();
             metrics.setRuntime(end - startTime);
 
@@ -176,7 +164,6 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
         } catch (Exception e) {
             result = error("Unexpected error: " + e.getMessage());
         } finally {
-            // Cleanup
             if (s3Stream != null) {
                 try { s3Stream.close(); } catch (IOException ignore) {}
             }
@@ -191,8 +178,6 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
         return result;
     }
 
-    // --- Helpers ---
-
     private static String asString(Object o) {
         return (o == null) ? null : String.valueOf(o);
     }
@@ -201,7 +186,6 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
         String k = key.toLowerCase(Locale.ROOT);
         if (k.endsWith(".jpeg") || k.endsWith(".jpg")) return "jpg";
         if (k.endsWith(".png")) return "png";
-        // Default to PNG if unknown; ImageIO writer will manage based on chosen format
         return "png";
     }
 

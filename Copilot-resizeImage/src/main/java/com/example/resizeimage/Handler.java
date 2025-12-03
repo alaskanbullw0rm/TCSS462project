@@ -1,9 +1,10 @@
 
-// File: rotate-image-lambda/src/main/java/com/example/rotateimage/Handler
-package org.example;
+// File: resize-image-lambda/src/main/java/com/example/resizeimage/Handler
+package com.example.resizeimage;
 
 import com.amazonaws.services.lambda.runtime.Context;
 import com.amazonaws.services.lambda.runtime.RequestHandler;
+import lambda.SAAMetrics;
 
 import software.amazon.awssdk.core.ResponseInputStream;
 import software.amazon.awssdk.core.sync.RequestBody;
@@ -22,11 +23,11 @@ import java.util.Locale;
 import java.util.Map;
 
 /**
- * rotateImage Lambda:
+ * resizeImage Lambda:
  * - Reads image from S3 (bucket, key)
- * - Rotates exactly 90 degrees clockwise
+ * - Resizes to exactly 128x128 using bilinear interpolation
  * - Preserves file format (PNG/JPG)
- * - Writes to "rotated-{key}"
+ * - Writes to "resized-{key}"
  * - Returns metrics + outputKey
  *
  * Fault tolerance:
@@ -36,7 +37,6 @@ import java.util.Map;
  */
 public class Handler implements RequestHandler<Map<String, Object>, Map<String, Object>> {
 
-    // Use one S3Client per invocation (SDK v2 is thread-safe, but Lambda handler is single-invocation here).
     private final S3Client s3 = S3Client.builder().build();
 
     @Override
@@ -46,20 +46,14 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
         // processing …
         long endTime = System.currentTimeMillis();
 
-        // NOTE: We will actually set start/end around real processing code below.
-        // The snippet above is included exactly as required and we will override timings properly.
-
         SAAMetrics metrics = new SAAMetrics();
 
-        // Basic validation
         String bucket = asString(input.get("bucket"));
         String key = asString(input.get("key"));
         if (bucket == null || bucket.isEmpty() || key == null || key.isEmpty()) {
             return error("Missing 'bucket' or 'key' in input.");
         }
 
-        // Enforce S3-only mode for large images (JSON payload limit ~6MB):
-        // Our contract is bucket/key only; if any unexpected payload field indicates inline image, return error.
         if (input.containsKey("imageBytes") || input.containsKey("imageBase64")) {
             return error("Inline image payloads are not supported. Provide S3 bucket/key only.");
         }
@@ -71,7 +65,6 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
         ResponseInputStream<GetObjectResponse> s3Stream = null;
 
         try {
-            // HEAD to get content length for memory-aware decision
             HeadObjectResponse head = s3.headObject(HeadObjectRequest.builder()
                     .bucket(bucket)
                     .key(key)
@@ -81,16 +74,13 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
             String format = formatFromKey(key);
             String contentType = contentTypeForFormat(format);
 
-            // Decide whether to stream directly or spool to /tmp
             Runtime rt = Runtime.getRuntime();
             long freeMem = rt.freeMemory();
-            long threshold = Math.max(5 * 1024 * 1024, freeMem / 2); // at least 5MB or half free mem
-
+            long threshold = Math.max(5 * 1024 * 1024, freeMem / 2);
             boolean useTmp = contentLength > threshold;
 
             if (useTmp) {
-                // Stream S3 object to /tmp file without loading whole object in memory
-                tempInputFile = Files.createTempFile("rotate-input-", "-" + sanitizeFilename(key));
+                tempInputFile = Files.createTempFile("resize-input-", "-" + sanitizeFilename(key));
                 try (ResponseInputStream<GetObjectResponse> in = s3.getObject(GetObjectRequest.builder()
                         .bucket(bucket)
                         .key(key)
@@ -104,7 +94,6 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
                 }
                 srcImage = ImageIO.read(tempInputFile.toFile());
             } else {
-                // Stream directly from S3 to ImageIO
                 s3Stream = s3.getObject(GetObjectRequest.builder()
                         .bucket(bucket)
                         .key(key)
@@ -116,30 +105,22 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
                 return error("Invalid image or unsupported format for key: " + key);
             }
 
-            // Perform rotation: 90 degrees clockwise
-            int srcW = srcImage.getWidth();
-            int srcH = srcImage.getHeight();
+            // Resize to 128x128 with bilinear interpolation
             int type = srcImage.getColorModel().hasAlpha() ? BufferedImage.TYPE_INT_ARGB : BufferedImage.TYPE_INT_RGB;
-
-            BufferedImage rotated = new BufferedImage(srcH, srcW, type);
-            Graphics2D g2d = rotated.createGraphics();
+            BufferedImage resized = new BufferedImage(128, 128, type);
+            Graphics2D g2d = resized.createGraphics();
             try {
-                // Bilinear interpolation for best visual quality during remap
                 g2d.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
-                // Translate then rotate to position source image correctly
-                g2d.translate(srcH, 0);
-                g2d.rotate(Math.toRadians(90));
-                g2d.drawImage(srcImage, 0, 0, null);
+                g2d.drawImage(srcImage, 0, 0, 128, 128, null);
             } finally {
                 g2d.dispose();
             }
 
-            // Write rotated image back to S3
-            String newKey = "rotated-" + key;
+            String newKey = "resized-" + key;
 
             if (useTmp) {
-                tempOutputFile = Files.createTempFile("rotate-output-", "-" + sanitizeFilename(newKey));
-                ImageIO.write(rotated, format, tempOutputFile.toFile());
+                tempOutputFile = Files.createTempFile("resize-output-", "-" + sanitizeFilename(newKey));
+                ImageIO.write(resized, format, tempOutputFile.toFile());
                 PutObjectRequest putReq = PutObjectRequest.builder()
                         .bucket(bucket)
                         .key(newKey)
@@ -147,9 +128,8 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
                         .build();
                 s3.putObject(putReq, RequestBody.fromFile(tempOutputFile));
             } else {
-                // Avoid unnecessary copies; write to ByteArrayOutputStream only when small enough
                 try (ByteArrayOutputStream baos = new ByteArrayOutputStream(Math.max(32 * 1024, (int) Math.min(contentLength, Integer.MAX_VALUE)))) {
-                    ImageIO.write(rotated, format, baos);
+                    ImageIO.write(resized, format, baos);
                     PutObjectRequest putReq = PutObjectRequest.builder()
                             .bucket(bucket)
                             .key(newKey)
@@ -159,7 +139,6 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
                 }
             }
 
-            // SAAF metrics
             long end = System.currentTimeMillis();
             metrics.setRuntime(end - startTime);
 
@@ -176,7 +155,6 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
         } catch (Exception e) {
             result = error("Unexpected error: " + e.getMessage());
         } finally {
-            // Cleanup
             if (s3Stream != null) {
                 try { s3Stream.close(); } catch (IOException ignore) {}
             }
@@ -191,8 +169,6 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
         return result;
     }
 
-    // --- Helpers ---
-
     private static String asString(Object o) {
         return (o == null) ? null : String.valueOf(o);
     }
@@ -201,7 +177,6 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
         String k = key.toLowerCase(Locale.ROOT);
         if (k.endsWith(".jpeg") || k.endsWith(".jpg")) return "jpg";
         if (k.endsWith(".png")) return "png";
-        // Default to PNG if unknown; ImageIO writer will manage based on chosen format
         return "png";
     }
 
