@@ -55,7 +55,10 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
             String key = keyObj.toString();
 
             ObjectMetadata metadata = s3.getObjectMetadata(bucket, key);
-            long contentLength = (metadata != null && metadata.getContentLength() != null) ? metadata.getContentLength() : -1L;
+            if (metadata != null) {
+                metadata.getContentLength();
+            }
+            long contentLength = -1L;
 
             InputStream imageInputStream = null;
             File tempFile = null;

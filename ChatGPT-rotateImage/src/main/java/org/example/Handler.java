@@ -62,7 +62,10 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
 
             // Request object metadata to check size
             ObjectMetadata metadata = s3.getObjectMetadata(bucket, key);
-            long contentLength = (metadata != null && metadata.getContentLength() != null) ? metadata.getContentLength() : -1L;
+            if (metadata != null) {
+                metadata.getContentLength();
+            }
+            long contentLength = -1L;
 
             // Decide whether to stream via /tmp (if object is large relative to free heap)
             InputStream imageInputStream = null;
