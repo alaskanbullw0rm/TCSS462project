@@ -20,6 +20,8 @@ import java.io.InputStream;
 import java.util.HashMap;
 import java.util.Map;
 
+import saaf.Inspector;
+
 public class Handler implements RequestHandler<Map<String, Object>, Map<String, Object>> {
 
     private final S3Client s3Client = S3Client.create();
@@ -27,6 +29,11 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
     @Override
     public Map<String, Object> handleRequest(Map<String, Object> input, Context context) {
         long startTime = System.currentTimeMillis();
+        
+        //Added manually
+        Inspector inspector = new Inspector();
+        inspector.inspectAll();
+        
         
         String bucket = (String) input.get("bucket");
         String key = (String) input.get("key");
@@ -86,6 +93,10 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
         Map<String, Object> metricsMap = metrics.toMap();
         response.putAll(metricsMap);
         
-        return response;
+        //return response;
+        
+        // added manually
+        inspector.inspectAllDeltas();
+        return inspector.finish();
     }
 }
