@@ -2,7 +2,6 @@ package org.example;
 
 import com.amazonaws.services.lambda.runtime.Context;
 import com.amazonaws.services.lambda.runtime.RequestHandler;
-import lambda.SAAMetrics;
 
 import com.amazonaws.auth.DefaultAWSCredentialsProviderChain;
 import com.amazonaws.services.s3.AmazonS3;
@@ -10,6 +9,9 @@ import com.amazonaws.services.s3.AmazonS3ClientBuilder;
 import com.amazonaws.services.s3.model.GetObjectRequest;
 import com.amazonaws.services.s3.model.ObjectMetadata;
 import com.amazonaws.services.s3.model.PutObjectRequest;
+
+import saaf.Inspector; // <--- ADDED SAAF Inspector import
+// SAAMetrics is removed/replaced by Inspector
 
 import javax.imageio.ImageIO;
 import javax.imageio.ImageReader;
@@ -20,7 +22,6 @@ import java.awt.image.BufferedImage;
 import java.io.*;
 import java.util.Iterator;
 import java.util.Map;
-import java.util.HashMap;
 import java.nio.file.Files;
 
 /**
@@ -30,7 +31,8 @@ import java.nio.file.Files;
  * - Preserves format where possible.
  * - Writes result back to same bucket under key: "resized-{key}".
  *
- * Implementation details and fault tolerance similar to rotateImage.
+ * NOTE: SAAF Inspector is now fully integrated to capture detailed system,
+ * container, CPU, and memory metrics, replacing simple runtime measurement.
  */
 public class Handler implements RequestHandler<Map<String, Object>, Map<String, Object>> {
 
@@ -40,16 +42,24 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
 
     @Override
     public Map<String, Object> handleRequest(Map<String, Object> input, Context context) {
-        long startTime = System.currentTimeMillis();
+
+        // --- SAAF INSPECTOR INTEGRATION START ---
+        Inspector inspector = new Inspector();
 
         try {
+            // Run initial inspections (platform, container, memory, cpu)
+            inspector.inspectAll();
+            // --- SAAF INSPECTOR INTEGRATION END ---
+
             if (input == null) {
-                return withMetricsError(startTime, "Input map is null");
+                // Passed inspector instead of startTime
+                return withMetricsError(inspector, "Input map is null");
             }
             Object bucketObj = input.get("bucket");
             Object keyObj = input.get("key");
             if (bucketObj == null || keyObj == null) {
-                return withMetricsError(startTime, "Missing bucket or key");
+                // Passed inspector instead of startTime
+                return withMetricsError(inspector, "Missing bucket or key");
             }
             String bucket = bucketObj.toString();
             String key = keyObj.toString();
@@ -76,7 +86,8 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
 
                 String formatName = detectFormatName(imageInputStream);
                 if (formatName == null) {
-                    return withMetricsError(startTime, "Unsupported or unknown image format for key: " + key);
+                    // Passed inspector instead of startTime
+                    return withMetricsError(inspector, "Unsupported or unknown image format for key: " + key);
                 }
 
                 if (imageInputStream.markSupported()) {
@@ -93,7 +104,8 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
 
                 BufferedImage src = ImageIO.read(imageInputStream);
                 if (src == null) {
-                    return withMetricsError(startTime, "Failed to decode image, invalid image data for key: " + key);
+                    // Passed inspector instead of startTime
+                    return withMetricsError(inspector, "Failed to decode image, invalid image data for key: " + key);
                 }
 
                 int targetW = 128;
@@ -101,6 +113,7 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
                 BufferedImage dest = new BufferedImage(targetW, targetH, src.getType() == 0 ? BufferedImage.TYPE_INT_ARGB : src.getType());
                 Graphics2D g2d = dest.createGraphics();
                 // Set bilinear interpolation (required)
+                //
                 g2d.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
                 g2d.drawImage(src, 0, 0, targetW, targetH, null);
                 g2d.dispose();
@@ -121,13 +134,14 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
                     s3.putObject(new PutObjectRequest(bucket, outKey, putIs, outMeta));
                 }
 
-                long endTime = System.currentTimeMillis();
+                // --- SAAF INSPECTOR INTEGRATION START (SUCCESS) ---
+                inspector.inspectAllDeltas();
 
-                SAAMetrics metrics = new SAAMetrics();
-                metrics.setRuntime(endTime - startTime);
-                Map<String, Object> out = metrics.toMap();
-                out.put("outputKey", outKey);
+                // Finalize inspector, calculating total runtime and returning the full metrics map
+                Map<String, Object> out = inspector.finish();
+                out.put("outputKey", outKey); // Add the successful output key
                 return out;
+                // --- SAAF INSPECTOR INTEGRATION END (SUCCESS) ---
 
             } finally {
                 if (imageInputStream != null) {
@@ -139,15 +153,22 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
             }
 
         } catch (Exception e) {
-            return withMetricsError(startTime, "Exception: " + e.getMessage());
+            // --- SAAF INSPECTOR INTEGRATION START (ERROR) ---
+            return withMetricsError(inspector, "Exception: " + e.getMessage());
+            // --- SAAF INSPECTOR INTEGRATION END (ERROR) ---
         }
     }
 
-    private Map<String, Object> withMetricsError(long startTime, String message) {
-        long endTime = System.currentTimeMillis();
-        SAAMetrics metrics = new SAAMetrics();
-        metrics.setRuntime(endTime - startTime);
-        Map<String, Object> out = metrics.toMap();
+    /**
+     * Utility: return metrics map containing error message, now integrated with Inspector.
+     * @param inspector The initialized SAAF Inspector object.
+     * @param message The error message to be included.
+     * @return The final map containing all SAAF metrics and the error message.
+     */
+    private Map<String, Object> withMetricsError(Inspector inspector, String message) {
+        // Run final deltas and finalize the Inspector
+        inspector.inspectAllDeltas();
+        Map<String, Object> out = inspector.finish();
         out.put("error", message);
         return out;
     }
@@ -155,6 +176,8 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
     private boolean shouldUseTmp(long contentLength) {
         if (contentLength <= 0) return false;
         long freeHeap = Runtime.getRuntime().freeMemory();
+        // Use temp file if content size is more than half the free heap,
+        // to prevent OOM errors during object creation/processing.
         return contentLength > (freeHeap / 2);
     }
 

@@ -2,7 +2,6 @@ package org.example;
 
 import com.amazonaws.services.lambda.runtime.Context;
 import com.amazonaws.services.lambda.runtime.RequestHandler;
-import lambda.SAAMetrics;
 
 import com.amazonaws.auth.DefaultAWSCredentialsProviderChain;
 import com.amazonaws.services.s3.AmazonS3;
@@ -10,6 +9,9 @@ import com.amazonaws.services.s3.AmazonS3ClientBuilder;
 import com.amazonaws.services.s3.model.GetObjectRequest;
 import com.amazonaws.services.s3.model.ObjectMetadata;
 import com.amazonaws.services.s3.model.PutObjectRequest;
+
+import saaf.Inspector; // <--- ADDED SAAF Inspector import
+// SAAMetrics is removed/replaced by Inspector
 
 import javax.imageio.ImageIO;
 import javax.imageio.ImageReader;
@@ -35,7 +37,8 @@ import java.nio.file.Files;
  * - Catches invalid images
  * - Uses /tmp fallback if content size indicates insufficient heap
  *
- * SAAF instrumentation is inserted exactly as required and merged with returned map.
+ * NOTE: SAAF Inspector is now fully integrated to capture detailed system,
+ * container, CPU, and memory metrics, replacing simple runtime measurement.
  */
 public class Handler implements RequestHandler<Map<String, Object>, Map<String, Object>> {
 
@@ -45,17 +48,25 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
 
     @Override
     public Map<String, Object> handleRequest(Map<String, Object> input, Context context) {
-        long startTime = System.currentTimeMillis();
+
+        // --- SAAF INSPECTOR INTEGRATION START ---
+        Inspector inspector = new Inspector();
 
         try {
+            // Run initial inspections (platform, container, memory, cpu)
+            inspector.inspectAll();
+            // --- SAAF INSPECTOR INTEGRATION END ---
+
             // Validate input
             if (input == null) {
-                return withMetricsError(startTime, "Input map is null");
+                // Passed inspector instead of startTime
+                return withMetricsError(inspector, "Input map is null");
             }
             Object bucketObj = input.get("bucket");
             Object keyObj = input.get("key");
             if (bucketObj == null || keyObj == null) {
-                return withMetricsError(startTime, "Missing bucket or key");
+                // Passed inspector instead of startTime
+                return withMetricsError(inspector, "Missing bucket or key");
             }
             String bucket = bucketObj.toString();
             String key = keyObj.toString();
@@ -87,7 +98,8 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
                 // Determine format
                 String formatName = detectFormatName(imageInputStream);
                 if (formatName == null) {
-                    return withMetricsError(startTime, "Unsupported or unknown image format for key: " + key);
+                    // Passed inspector instead of startTime
+                    return withMetricsError(inspector, "Unsupported or unknown image format for key: " + key);
                 }
 
                 // Reset stream (if possible). If detection consumed stream by wrapping, reopen it
@@ -108,7 +120,8 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
                 // Read image into BufferedImage
                 BufferedImage src = ImageIO.read(imageInputStream);
                 if (src == null) {
-                    return withMetricsError(startTime, "Failed to decode image, invalid image data for key: " + key);
+                    // Passed inspector instead of startTime
+                    return withMetricsError(inspector, "Failed to decode image, invalid image data for key: " + key);
                 }
 
                 // Rotate 90 degrees clockwise: create dest with swapped width/height
@@ -142,14 +155,14 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
                     s3.putObject(new PutObjectRequest(bucket, outKey, putIs, outMeta));
                 }
 
-                // Build and return metrics + outputKey
-                long endTime = System.currentTimeMillis();
+                // --- SAAF INSPECTOR INTEGRATION START (SUCCESS) ---
+                inspector.inspectAllDeltas();
 
-                SAAMetrics metrics = new SAAMetrics();
-                metrics.setRuntime(endTime - startTime);
-                Map<String, Object> out = metrics.toMap();
+                // Finalize inspector, calculating total runtime and returning the full metrics map
+                Map<String, Object> out = inspector.finish();
                 out.put("outputKey", outKey);
                 return out;
+                // --- SAAF INSPECTOR INTEGRATION END (SUCCESS) ---
 
             } finally {
                 if (imageInputStream != null) {
@@ -162,16 +175,22 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
             }
 
         } catch (Exception e) {
-            return withMetricsError(startTime, "Exception: " + e.getMessage());
+            // --- SAAF INSPECTOR INTEGRATION START (ERROR) ---
+            return withMetricsError(inspector, "Exception: " + e.getMessage());
+            // --- SAAF INSPECTOR INTEGRATION END (ERROR) ---
         }
     }
 
-    // Utility: return metrics map containing error message
-    private Map<String, Object> withMetricsError(long startTime, String message) {
-        long endTime = System.currentTimeMillis();
-        SAAMetrics metrics = new SAAMetrics();
-        metrics.setRuntime(endTime - startTime);
-        Map<String, Object> out = metrics.toMap();
+    /**
+     * Utility: return metrics map containing error message, now integrated with Inspector.
+     * @param inspector The initialized SAAF Inspector object.
+     * @param message The error message to be included.
+     * @return The final map containing all SAAF metrics and the error message.
+     */
+    private Map<String, Object> withMetricsError(Inspector inspector, String message) {
+        // Run final deltas and finalize the Inspector
+        inspector.inspectAllDeltas();
+        Map<String, Object> out = inspector.finish();
         out.put("error", message);
         return out;
     }
