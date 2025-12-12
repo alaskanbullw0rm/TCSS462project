@@ -19,12 +19,22 @@ import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
 
+import saaf.Inspector;
+
 public class Handler implements RequestHandler<Map<String, Object>, Map<String, Object>> {
 
     private final S3Client s3Client = S3Client.create();
 
     @Override
     public Map<String, Object> handleRequest(Map<String, Object> input, Context context) {
+        
+        // Added manually
+        Inspector inspector = new Inspector();
+        inspector.inspectAll();
+        
+        
+        
+        
         long startTime = System.currentTimeMillis();
         
         String bucket = (String) input.get("bucket");
@@ -93,6 +103,12 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
         Map<String, Object> metricsMap = metrics.toMap();
         response.putAll(metricsMap);
         
-        return response;
+        //return response;
+        
+        
+                
+        //Collect final information such as total runtime and cpu deltas.
+        inspector.inspectAllDeltas();
+        return inspector.finish();
     }
 }
