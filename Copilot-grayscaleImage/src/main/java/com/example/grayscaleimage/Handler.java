@@ -5,7 +5,7 @@ package com.example.grayscaleimage;
 import com.amazonaws.services.lambda.runtime.Context;
 import com.amazonaws.services.lambda.runtime.RequestHandler;
 import lambda.SAAMetrics;
-
+import saaf.Inspector;
 import software.amazon.awssdk.core.ResponseInputStream;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
@@ -40,6 +40,8 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
     @Override
     public Map<String, Object> handleRequest(Map<String, Object> input, Context context) {
 
+        Inspector inspector = new Inspector();
+        inspector.inspectAll();
         long startTime = System.currentTimeMillis();
         // processing …
         long endTime = System.currentTimeMillis();
@@ -152,6 +154,7 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
             metrics.setRuntime(end - startTime);
 
             LinkedHashMap<String, Object> out = new LinkedHashMap<>(metrics.toMap());
+            out.put("bucket", bucket);
             out.put("outputKey", newKey);
             result = out;
 
@@ -174,8 +177,8 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
                 try { Files.deleteIfExists(tempOutputFile); } catch (IOException ignore) {}
             }
         }
-
-        return result;
+        inspector.inspectAllDeltas();
+        return inspector.finish();
     }
 
     private static String asString(Object o) {
@@ -203,3 +206,4 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
         return m;
     }
 }
+
