@@ -5,6 +5,8 @@ package org.example;
 import com.amazonaws.services.lambda.runtime.Context;
 import com.amazonaws.services.lambda.runtime.RequestHandler;
 
+import lambda.SAAMetrics;
+import saaf.Inspector;
 import software.amazon.awssdk.core.ResponseInputStream;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
@@ -42,9 +44,9 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
     @Override
     public Map<String, Object> handleRequest(Map<String, Object> input, Context context) {
 
-        long startTime = System.currentTimeMillis();
-        // processing …
-        long endTime = System.currentTimeMillis();
+
+        Inspector inspector = new Inspector();
+        inspector.inspectAll();
 
         // NOTE: We will actually set start/end around real processing code below.
         // The snippet above is included exactly as required and we will override timings properly.
@@ -159,13 +161,6 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
                 }
             }
 
-            // SAAF metrics
-            long end = System.currentTimeMillis();
-            metrics.setRuntime(end - startTime);
-
-            LinkedHashMap<String, Object> out = new LinkedHashMap<>(metrics.toMap());
-            out.put("outputKey", newKey);
-            result = out;
 
         } catch (NoSuchKeyException e) {
             result = error("S3 object not found: " + e.getMessage());
@@ -187,8 +182,9 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
                 try { Files.deleteIfExists(tempOutputFile); } catch (IOException ignore) {}
             }
         }
-
-        return result;
+        
+        inspector.inspectAllDeltas();
+        return inspector.finish();
     }
 
     // --- Helpers ---
@@ -219,3 +215,4 @@ public class Handler implements RequestHandler<Map<String, Object>, Map<String, 
         return m;
     }
 }
+
